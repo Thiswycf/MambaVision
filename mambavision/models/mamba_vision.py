@@ -8,6 +8,9 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import os
+# VISUALIZATION_PT_PATH = '/public/zhanghaojie/MambaVision/workspace/visualization/saved_pt'
+VISUALIZATION_PT_PATH = None
 
 import torch
 import torch.nn as nn
@@ -612,15 +615,35 @@ class MambaVisionLayer(nn.Module):
                 Hp, Wp = H, W
             x = window_partition(x, self.window_size)
 
-        for _, blk in enumerate(self.blocks):
+        for i, blk in enumerate(self.blocks):
             x = blk(x)
+            if VISUALIZATION_PT_PATH is not None:
+                _type = 'conv' if self.conv else 'atten' if isinstance(blk.mixer, Attention) else 'mamba'
+                if self.transformer_block:
+                    vis_x = window_reverse(x, self.window_size, Hp, Wp)
+                    if pad_r > 0 or pad_b > 0:
+                        vis_x = vis_x[:, :, :H, :W].contiguous()
+                else:
+                    vis_x = x
+                # print(f'type = {_type}, {tuple(x.shape)}')
+                os.makedirs(VISUALIZATION_PT_PATH, exist_ok=True)
+                # 获取当前路径下已有的.pt文件，解析编号
+                existing_files = [f for f in os.listdir(VISUALIZATION_PT_PATH) if f.endswith('.pt')]
+                max_num = 0
+                for f in existing_files:
+                    # 提取文件名开头的数字部分
+                    parts = f.split('_')
+                    if parts and parts[0].isdigit():
+                        max_num = max(max_num, int(parts[0]))
+                next_num = max_num + 1
+                torch.save(vis_x, os.path.join(VISUALIZATION_PT_PATH, f'{next_num:02d}_{_type}_{i}.pt'))
         if self.transformer_block:
             x = window_reverse(x, self.window_size, Hp, Wp)
             if pad_r > 0 or pad_b > 0:
                 x = x[:, :, :H, :W].contiguous()
-        if self.downsample is None:
-            return x
-        return self.downsample(x)
+        if self.downsample:
+            x = self.downsample(x)
+        return x
 
 
 class MambaVision(nn.Module):
@@ -685,7 +708,8 @@ class MambaVision(nn.Module):
                                      downsample=(i < 3),
                                      layer_scale=layer_scale,
                                      layer_scale_conv=layer_scale_conv,
-                                     transformer_blocks=list(range(depths[i]//2+1, depths[i])) if depths[i]%2!=0 else list(range(depths[i]//2, depths[i])),
+                                     transformer_blocks=list(range(depths[i]//2+1, depths[i])) if depths[i]%2!=0 else list(range(depths[i]//2, depths[i])), # default: 0.5x mamba + 0.5x attention
+                                    #  transformer_blocks=list(range(depths[i])), # 1.0x attention
                                      )
             self.levels.append(level)
         self.norm = nn.BatchNorm2d(num_features)
@@ -714,6 +738,10 @@ class MambaVision(nn.Module):
 
     def forward_features(self, x):
         x = self.patch_embed(x)
+        if VISUALIZATION_PT_PATH is not None:
+            # print(f'type = patch_embed, {tuple(x.shape)}')
+            os.makedirs(VISUALIZATION_PT_PATH, exist_ok=True)
+            torch.save(x, os.path.join(VISUALIZATION_PT_PATH, f'00_patch_embed.pt'))
         for level in self.levels:
             x = level(x)
         x = self.norm(x)

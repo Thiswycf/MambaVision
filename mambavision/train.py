@@ -301,8 +301,8 @@ group.add_argument('--recovery-interval', type=int, default=0, metavar='N',
                     help='how many batches to wait before writing recovery checkpoint')
 group.add_argument('--checkpoint-hist', type=int, default=1, metavar='N',
                     help='number of checkpoints to keep (default: 3)')
-group.add_argument('-j', '--workers', type=int, default=8, metavar='N',
-                    help='how many training processes to use (default: 8)')
+group.add_argument('-j', '--workers', type=int, default=16, metavar='N',
+                    help='how many training processes to use (default: 16)')
 group.add_argument('--save-images', action='store_true', default=False,
                     help='save images of input bathes every log interval for debugging')
 group.add_argument('--amp', action='store_true', default=False,
@@ -504,8 +504,8 @@ def main():
     # optionally resume from a checkpoint
     resume_epoch = None
 
-    if not os.path.isfile(args.resume):
-        args.resume = ""
+    if isinstance(args.resume, str) and args.resume != "" and not os.path.isfile(args.resume):
+        raise FileNotFoundError(f"Checkpoint not found at {args.resume}")
 
     if args.resume:
         resume_epoch = resume_checkpoint(

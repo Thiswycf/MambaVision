@@ -1,0 +1,102 @@
+# MambaVision SuperNet (Tiny) 训练配置文件
+# 基于Sandwich Rule的SPOS训练
+
+# 数据集配置
+data_dir: /home/lqz25zhj/data/ImageNet1k
+dataset: ''
+train_split: train
+val_split: val
+
+# 模型配置（Tiny模型参数）
+supernet_k: 4
+supernet_dim: 80
+supernet_in_dim: 32
+supernet_depths: [1, 3, 8, 4]
+supernet_num_heads: [2, 4, 8, 16]
+supernet_window_size: [8, 8, 14, 7]
+num_classes: 1000
+
+# 输入配置
+img_size: 224
+input_size: [3, 224, 224]
+crop_pct: 1.0
+
+# 训练超参数
+batch_size: 64
+validation_batch_size: 64
+epochs: 200
+
+# 优化器配置
+opt: lamb
+lr: 0.001
+opt_eps: 1.0e-08
+opt_betas: [0.9, 0.999]
+momentum: 0.9
+weight_decay: 0.05
+clip_grad: 1.0
+
+# 学习率调度
+sched: cosine
+warmup_lr: 1.0e-06
+min_lr: 5.0e-06
+warmup_epochs: 30
+decay_rate: 0.1
+
+# 正则化（相比标准训练降低drop_path_rate）
+drop_rate: 0.0
+drop_path: 0.1
+attn_drop_rate: 0.0
+smoothing: 0.1
+
+# 数据增强
+scale: [0.08, 1.0]
+ratio: [0.75, 1.3333333333333333]
+hflip: 0.5
+color_jitter: 0.4
+aa: rand-m9-mstd0.5-inc1
+train_interpolation: random
+reprob: 0.25
+remode: pixel
+recount: 1
+
+# Mixup/Cutmix
+mixup: 0.8
+cutmix: 1.0
+mixup_prob: 1.0
+mixup_switch_prob: 0.5
+mixup_mode: batch
+
+# EMA配置
+model_ema: false
+model_ema_decay: 0.9998
+
+# 分布式训练
+sync_bn: false
+dist_bn: reduce
+
+# 混合精度训练
+amp: true
+
+# 日志和输出
+log_per_epoch: 100
+output: /public/zhanghaojie/MambaVision/nas/weights/supernet_tiny
+checkpoint_dir: /public/zhanghaojie/MambaVision/nas/checkpoints/supernet_tiny
+log_dir: /public/zhanghaojie/MambaVision/nas/logs/supernet_tiny
+tag: supernet_tiny
+checkpoint_hist: 3
+
+# 断点续训
+resume: ''
+auto_resume: true
+
+# 其他
+seed: 42
+workers: 16
+pin_mem: true
+channels_last: true
+no_prefetcher: false
+mesa: 0.5
+mesa_start_ratio: 0.25
+decay_epochs: 100
+decay_milestones: [60, 120, 180]
+cycle_decay: 1.0
