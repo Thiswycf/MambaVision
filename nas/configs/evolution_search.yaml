@@ -1,0 +1,42 @@
+# NSGA-II search over the MambaVision NAS supernet.
+
+supernet_config: nas/configs/supernet_tiny.yaml
+checkpoint: nas/checkpoints/supernet_tiny/supernet_tiny_best.pth
+use_ema: false
+
+log_dir: nas/logs/evolution
+resume: true
+
+cache:
+  use_global_cache: true
+  save_global_cache: true
+  global_cache_path: nas/logs/evolution/global_evaluation_cache.json
+
+evolution:
+  population_size: 128
+  generations: 100
+  crossover_prob: 1.0
+  mutation_prob: 0.2
+  mutation_min_sites: 1
+  mutation_max_sites: 2
+  archive_interval: 10
+  seed: 42
+  cost_objective: throughput
+
+evaluation:
+  batch_size: 512
+  workers: 16
+  amp: true
+  channels_last: true
+  data_dir: null
+  dataset: null
+  val_split: null
+  crop_pct: null
+  limit_batches: 0
+  log_interval: 0
+  throughput_batch_size: 128
+  throughput_iters: 100
+  throughput_warmup: 10
+
+gpu:
+  device_ids: [0, 1, 2, 3]

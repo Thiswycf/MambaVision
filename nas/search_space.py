@@ -10,6 +10,8 @@
 """
 
 import random
+import time
+from contextlib import nullcontext
 from typing import List, Dict, Tuple
 
 # MambaVision-Tiny 各阶段层数配置
@@ -179,15 +181,62 @@ def genotype_to_transformer_blocks(genotype: str) -> Dict[int, List[int]]:
     return transformer_blocks
 
 
-def compute_genotype_flops_hint(genotype: str) -> float:
+def compute_genotype_throughput(
+    model,
+    genotype: str,
+    batch_size: int = 128,
+    input_resolution: Tuple[int, int, int] = (3, 224, 224),
+    num_iterations: int = 100,
+    num_warmup: int = 10,
+    use_amp: bool = False,
+    channels_last: bool = False,
+) -> Dict[str, float]:
     """
-    粗略估计基因序列对应的相对计算量（FLOPs hint）
-    用于评估子网计算量大小
+    测量指定基因子网的推理吞吐量。
 
-    假设: C < M < A 的计算量比例约为 1 : 2 : 3
+    方法参考 little_workspace/throughout_measure：使用随机输入，先 warmup，
+    再通过 CUDA synchronize 统计固定迭代的平均推理时间。
+
+    Returns:
+        dict: {'avg_time': seconds / iter, 'throughput': images / second}
     """
-    op_cost = {'C': 1.0, 'M': 2.0, 'A': 3.0}
-    return sum(op_cost.get(op, 1.0) for op in genotype)
+    if not validate_genotype(genotype):
+        raise ValueError(f"Invalid genotype: {genotype}")
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("compute_genotype_throughput requires PyTorch") from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for throughput measurement")
+
+    model.cuda().eval()
+    inputs = torch.randn(batch_size, *input_resolution, device='cuda')
+    if channels_last:
+        inputs = inputs.contiguous(memory_format=torch.channels_last)
+
+    autocast = torch.cuda.amp.autocast if use_amp else nullcontext
+    with torch.no_grad():
+        for _ in range(num_warmup):
+            with autocast():
+                model(inputs, genotype)
+        torch.cuda.synchronize()
+
+        start_time = time.time()
+        for _ in range(num_iterations):
+            with autocast():
+                model(inputs, genotype)
+        torch.cuda.synchronize()
+        end_time = time.time()
+
+    avg_time = (end_time - start_time) / num_iterations
+    result = {
+        'avg_time': avg_time,
+        'throughput': batch_size / avg_time,
+    }
+    torch.cuda.empty_cache()
+    return result
 
 
 def validate_genotype(genotype: str) -> bool:
@@ -208,4 +257,4 @@ if __name__ == '__main__':
 
     sandwich = get_sandwich_subnet_genotypes(k=5)
     for tag, sg in sandwich:
-        print(f"{tag}: {sg}, FLOPs hint: {compute_genotype_flops_hint(sg):.1f}")
+        print(f"{tag}: {sg}")

@@ -1,0 +1,91 @@
+# 子网重训练默认配置
+# 与 train_t.sh 保持一致
+
+# 数据集参数
+data_dir: "/home/lqz25zhj/data/ImageNet1k"
+train_split: "train"
+val_split: "validation"
+
+# 模型参数
+num_classes: 1000
+img_size: 224
+input_size: [3, 224, 224]
+crop_pct: 0.875
+
+# 超网架构参数
+supernet_dim: 80
+supernet_in_dim: 32
+supernet_depths: [1, 3, 8, 4]
+supernet_num_heads: [2, 4, 8, 16]
+supernet_window_size: [8, 8, 14, 7]
+
+# 训练超参数
+batch_size: 256
+epochs: 310
+
+# 优化器参数
+opt: "lamb"
+lr: 0.0025
+weight_decay: 0.05
+clip_grad: 5.0
+
+# 学习率调度参数
+sched: "cosine"
+warmup_lr: 1e-6
+min_lr: 5e-6
+warmup_epochs: 20
+
+# 正则化参数
+drop_rate: 0.0
+drop_path: 0.2
+attn_drop_rate: 0.0
+smoothing: 0.1
+
+# 数据增强参数
+scale: [0.08, 1.0]
+ratio: [0.75, 1.33]
+hflip: 0.5
+color_jitter: 0.4
+aa: "rand-m9-mstd0.5-inc1"
+train_interpolation: "random"
+reprob: 0.25
+remode: "pixel"
+recount: 1
+
+# Mixup/Cutmix参数
+mixup: 0.8
+cutmix: 1.0
+mixup_prob: 1.0
+mixup_switch_prob: 0.5
+mixup_mode: "batch"
+
+# EMA参数
+model_ema: true
+model_ema_decay: 0.9998
+
+# 混合精度训练
+amp: true
+
+# 分布式训练
+sync_bn: false
+dist_bn: "reduce"
+
+# 日志和输出参数
+log_per_epoch: 10
+output: "/public/zhanghaojie/MambaVision/nas/weights"
+checkpoint_dir: "/public/zhanghaojie/MambaVision/nas/checkpoints"
+log_dir: "/public/zhanghaojie/MambaVision/nas/logs"
+tag: "subnet"
+checkpoint_hist: 3
+
+# 断点续训
+auto_resume: true
+
+# 其他参数
+seed: 42
+workers: 16
+pin_mem: true
+channels_last: true
+no_prefetcher: false
+mesa: 0.0
+mesa_start_ratio: 0.25

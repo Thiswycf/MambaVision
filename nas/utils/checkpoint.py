@@ -107,6 +107,13 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, lr_scheduler=None,
     if model_ema is not None and 'state_dict_ema' in checkpoint:
         model_ema.load_state_dict(checkpoint['state_dict_ema'])
         _logger.info("Loaded EMA model state")
+        if hasattr(model_ema, 'sync_stale_buffers'):
+            synced_buffers = model_ema.sync_stale_buffers(model)
+            if synced_buffers:
+                _logger.warning(
+                    "Synchronized %d stale EMA buffers from model state; "
+                    "the checkpoint likely came from an older EMA implementation.",
+                    synced_buffers)
 
     # 加载loss scaler状态
     if loss_scaler is not None and 'loss_scaler' in checkpoint:

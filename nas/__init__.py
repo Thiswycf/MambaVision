@@ -7,7 +7,7 @@ from .search_space import (
     parse_genotype, genotype_from_stage_ops,
     random_genotype, get_max_subnet_genotype, get_mid_subnet_genotype, get_min_subnet_genotype,
     sample_subnet_genotype, get_sandwich_subnet_genotypes,
-    genotype_to_transformer_blocks, compute_genotype_flops_hint, validate_genotype
+    genotype_to_transformer_blocks, compute_genotype_throughput, validate_genotype
 )
 
 from .supernet import MambaVisionSuperNet, SuperBlock, SuperStage
@@ -17,6 +17,6 @@ __all__ = [
     'parse_genotype', 'genotype_from_stage_ops',
     'random_genotype', 'get_max_subnet_genotype', 'get_mid_subnet_genotype', 'get_min_subnet_genotype',
     'sample_subnet_genotype', 'get_sandwich_subnet_genotypes',
-    'genotype_to_transformer_blocks', 'compute_genotype_flops_hint', 'validate_genotype',
+    'genotype_to_transformer_blocks', 'compute_genotype_throughput', 'validate_genotype',
     'MambaVisionSuperNet', 'SuperBlock', 'SuperStage',
 ]
