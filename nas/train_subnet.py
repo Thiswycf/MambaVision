@@ -12,6 +12,7 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -101,6 +102,10 @@ def parse_args():
                         help='Input batch size for training (default: 256)')
     parser.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                         help='Validation batch size override')
+    parser.add_argument('--limit-train-batches', type=int, default=0,
+                        help='Limit train batches per epoch for budgeted pilot runs; 0 means full epoch')
+    parser.add_argument('--limit-val-batches', type=int, default=0,
+                        help='Limit validation batches for budgeted pilot runs; 0 means full validation')
     parser.add_argument('--epochs', type=int, default=310, metavar='N',
                         help='number of epochs to train (default: 310)')
     parser.add_argument('--start-epoch', default=None, type=int, metavar='N',
@@ -183,7 +188,7 @@ def parse_args():
                         help='decay factor for model weights moving average')
 
     # 分布式训练参数
-    parser.add_argument('--local_rank', default=0, type=int)
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', default=0, type=int)
     parser.add_argument('--sync-bn', action='store_true', default=False,
                         help='Enable synchronized BatchNorm')
     parser.add_argument('--dist-bn', type=str, default='reduce',
@@ -204,12 +209,16 @@ def parse_args():
                         help='path to tensorboard log directory')
     parser.add_argument('--tag', default='subnet', type=str,
                         help='experiment tag')
+    parser.add_argument('--metrics-json', default='', type=str,
+                        help='Optional path to write parseable epoch metrics as JSON')
     parser.add_argument('--checkpoint-hist', type=int, default=3, metavar='N',
                         help='number of checkpoints to keep')
 
     # 断点续训
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='Resume full model and optimizer state from checkpoint')
+    parser.add_argument('--resume-weights-only', action='store_true', default=False,
+                        help='Load only model weights from --resume and start a fresh optimizer/scheduler')
     parser.add_argument('--auto-resume', action='store_true', default=True,
                         help='Auto resume from latest checkpoint in checkpoint-dir')
 
@@ -235,7 +244,9 @@ def parse_args():
             cfg = yaml.safe_load(f)
             parser.set_defaults(**cfg)
 
-    args = parser.parse_args(remaining)
+    # Apply YAML as defaults, then parse the full command line so explicit CLI
+    # arguments override config values for budgeted pilot runs.
+    args = parser.parse_args()
     return args
 
 
@@ -336,10 +347,14 @@ def train_one_epoch(
     model.train()
 
     end = time.time()
-    last_idx = len(loader) - 1
-    num_updates = epoch * len(loader)
+    max_batches = int(getattr(args, 'limit_train_batches', 0) or 0)
+    effective_len = min(len(loader), max_batches) if max_batches else len(loader)
+    last_idx = effective_len - 1
+    num_updates = epoch * effective_len
 
     for batch_idx, (input, target) in enumerate(loader):
+        if max_batches and batch_idx >= max_batches:
+            break
         data_time_m.update(time.time() - end)
 
         if not args.no_prefetcher:
@@ -405,8 +420,9 @@ def train_one_epoch(
             lr = sum(lrl) / len(lrl)
 
             if args.local_rank == 0:
+                progress = 100. * batch_idx / max(1, last_idx)
                 _logger.info(
-                    f'Train: {epoch} [{batch_idx:>4d}/{len(loader)} ({100. * batch_idx / last_idx:>3.0f}%)]  '
+                    f'Train: {epoch} [{batch_idx:>4d}/{effective_len} ({progress:>3.0f}%)]  '
                     f'Time: {batch_time_m.val:.3f} ({batch_time_m.avg:.3f})  '
                     f'Loss: {loss_m.val:>7.4f} ({loss_m.avg:>6.4f})  '
                     f'LR: {lr:.3e}'
@@ -442,9 +458,13 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
     model.eval()
 
     end = time.time()
-    last_idx = len(loader) - 1
+    max_batches = int(getattr(args, 'limit_val_batches', 0) or 0)
+    effective_len = min(len(loader), max_batches) if max_batches else len(loader)
+    last_idx = effective_len - 1
 
     for batch_idx, (input, target) in enumerate(loader):
+        if max_batches and batch_idx >= max_batches:
+            break
         last_batch = batch_idx == last_idx
 
         if not args.no_prefetcher:
@@ -497,6 +517,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
                 log_triggered = True
 
         if args.local_rank == 0 and log_triggered:
+            display_total = max(0, effective_len - 1)
             log_name = 'Test' + log_suffix
             _logger.info(
                 '{0}: [{1:>4d}/{2}]  '
@@ -504,7 +525,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
                 'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
                 'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
                 'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
-                    log_name, batch_idx, last_idx, batch_time=batch_time_m,
+                    log_name, batch_idx, display_total, batch_time=batch_time_m,
                     loss=losses_m, top1=top1_m, top5=top5_m))
 
         end = time.time()
@@ -622,12 +643,19 @@ def main():
     start_epoch = 0
     best_metric = None
     if args.resume:
+        resume_optimizer = None if args.resume_weights_only else optimizer
+        resume_scheduler = None if args.resume_weights_only else lr_scheduler
+        resume_loss_scaler = None if args.resume_weights_only else loss_scaler
         result = load_checkpoint(
-            args.resume, model, optimizer, lr_scheduler,
-            model_ema, loss_scaler, strict=True
+            args.resume, model, resume_optimizer, resume_scheduler,
+            model_ema, resume_loss_scaler, strict=True
         )
-        start_epoch = result['epoch'] + 1
-        best_metric = result['best_metric']
+        if args.resume_weights_only:
+            start_epoch = 0
+            best_metric = None
+        else:
+            start_epoch = result['epoch'] + 1
+            best_metric = result['best_metric']
     elif args.auto_resume:
         start_epoch, best_metric = resume_training(
             args.checkpoint_dir, model, optimizer, lr_scheduler,
@@ -668,6 +696,7 @@ def main():
 
     eval_metric = 'top1'
     best_epoch = None
+    history = []
 
     _logger.info(f'Starting training from epoch {start_epoch}, total epochs {num_epochs}')
 
@@ -734,6 +763,29 @@ def main():
                     f'Epoch {epoch}: test_acc1={eval_metrics["top1"]:.4f}, '
                     f'test_loss={eval_metrics["loss"]:.4f}, best_acc1={best_metric:.4f} (epoch {best_epoch})'
                 )
+
+                history.append(OrderedDict([
+                    ('epoch', epoch),
+                    ('genotype', args.genotype),
+                    ('train', train_metrics),
+                    ('eval', eval_metrics),
+                    ('best_metric', best_metric),
+                    ('best_epoch', best_epoch),
+                ]))
+                if args.metrics_json:
+                    os.makedirs(os.path.dirname(args.metrics_json) or '.', exist_ok=True)
+                    with open(args.metrics_json, 'w') as f:
+                        json.dump(OrderedDict([
+                            ('tag', args.tag),
+                            ('config', args.config),
+                            ('genotype', args.genotype),
+                            ('supernet_dim', args.supernet_dim),
+                            ('supernet_in_dim', args.supernet_in_dim),
+                            ('supernet_num_heads', args.supernet_num_heads),
+                            ('limit_train_batches', getattr(args, 'limit_train_batches', 0)),
+                            ('limit_val_batches', getattr(args, 'limit_val_batches', 0)),
+                            ('history', history),
+                        ]), f, indent=2)
 
                 if log_writer is not None:
                     log_writer.update(tag_prefix='train', step=epoch, train_loss_epoch=train_metrics['loss'])

@@ -52,6 +52,8 @@ def parse_args():
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--val-split", default=None)
+    parser.add_argument("--img-size", type=int, default=None)
+    parser.add_argument("--input-size", nargs=3, type=int, default=None)
     parser.add_argument("--crop-pct", type=float, default=None)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--limit-batches", type=int, default=0, help="debug only; 0 means full val set")
@@ -80,8 +82,10 @@ def parse_args():
         args.val_split = cfg.get("val_split", "val")
     if args.crop_pct is None:
         args.crop_pct = cfg.get("crop_pct", 1.0)
-    args.img_size = cfg.get("img_size", 224)
-    args.input_size = cfg.get("input_size", [3, args.img_size, args.img_size])
+    if args.img_size is None:
+        args.img_size = cfg.get("img_size", 224)
+    if args.input_size is None:
+        args.input_size = cfg.get("input_size", [3, args.img_size, args.img_size])
     args.num_classes = cfg.get("num_classes", 1000)
     args.supernet_dim = cfg.get("supernet_dim", 80)
     args.supernet_in_dim = cfg.get("supernet_in_dim", 32)

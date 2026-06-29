@@ -1,0 +1,89 @@
+# MambaVision SuperNet 0.5x pilot config for SCH-NAS.
+
+data_dir: /home/lqz25zhj/data/ImageNet1k
+dataset: ''
+train_split: train
+val_split: val
+
+supernet_k: 4
+supernet_dim: 40
+supernet_in_dim: 16
+supernet_depths: [1, 3, 8, 4]
+supernet_num_heads: [1, 2, 4, 8]
+supernet_window_size: [8, 8, 14, 7]
+num_classes: 1000
+
+img_size: 224
+input_size: [3, 224, 224]
+crop_pct: 1.0
+
+batch_size: 64
+validation_batch_size: 64
+epochs: 4
+limit_train_batches: 600
+limit_val_batches: 50
+metrics_json: /public/zhanghaojie/MambaVision/refine-logs/micro_0p5_train_metrics.json
+
+opt: lamb
+lr: 0.001
+opt_eps: 1.0e-08
+opt_betas: [0.9, 0.999]
+momentum: 0.9
+weight_decay: 0.05
+clip_grad: 1.0
+
+sched: cosine
+warmup_lr: 1.0e-06
+min_lr: 5.0e-06
+warmup_epochs: 1
+decay_rate: 0.1
+
+drop_rate: 0.0
+drop_path: 0.1
+attn_drop_rate: 0.0
+smoothing: 0.1
+
+scale: [0.08, 1.0]
+ratio: [0.75, 1.3333333333333333]
+hflip: 0.5
+color_jitter: 0.4
+aa: rand-m9-mstd0.5-inc1
+train_interpolation: random
+reprob: 0.25
+remode: pixel
+recount: 1
+
+mixup: 0.8
+cutmix: 1.0
+mixup_prob: 1.0
+mixup_switch_prob: 0.5
+mixup_mode: batch
+
+model_ema: false
+model_ema_decay: 0.9998
+
+sync_bn: false
+dist_bn: reduce
+
+amp: true
+
+log_per_epoch: 20
+output: /public/zhanghaojie/MambaVision/nas/weights/supernet_micro_0p5
+checkpoint_dir: /public/zhanghaojie/MambaVision/nas/checkpoints/supernet_micro_0p5
+log_dir: /public/zhanghaojie/MambaVision/nas/logs/supernet_micro_0p5
+tag: supernet_micro_0p5
+checkpoint_hist: 3
+
+resume: ''
+auto_resume: false
+
+seed: 42
+workers: 8
+pin_mem: true
+channels_last: true
+no_prefetcher: false
+mesa: 0.0
+mesa_start_ratio: 0.25
+decay_epochs: 100
+decay_milestones: [60, 120, 180]
+cycle_decay: 1.0

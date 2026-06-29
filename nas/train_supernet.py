@@ -18,6 +18,7 @@ CUDA_VISIBLE_DEVICES=2,3,4,5 torchrun --nproc_per_node=4 nas/train_supernet.py -
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -108,6 +109,10 @@ def parse_args():
                         help='Input batch size for training (default: 128)')
     parser.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                         help='Validation batch size override')
+    parser.add_argument('--limit-train-batches', type=int, default=0,
+                        help='Limit train batches per epoch for budgeted pilot runs; 0 means full epoch')
+    parser.add_argument('--limit-val-batches', type=int, default=0,
+                        help='Limit validation batches for budgeted pilot runs; 0 means full validation')
     parser.add_argument('--epochs', type=int, default=120, metavar='N',
                         help='number of epochs to train (default: 120)')
     parser.add_argument('--start-epoch', default=None, type=int, metavar='N',
@@ -190,7 +195,7 @@ def parse_args():
                         help='decay factor for model weights moving average')
 
     # 分布式训练参数
-    parser.add_argument('--local_rank', default=0, type=int)
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', default=0, type=int)
     parser.add_argument('--sync-bn', action='store_true', default=False,
                         help='Enable synchronized BatchNorm')
     parser.add_argument('--dist-bn', type=str, default='reduce',
@@ -211,12 +216,16 @@ def parse_args():
                         help='path to tensorboard log directory')
     parser.add_argument('--tag', default='supernet', type=str,
                         help='experiment tag')
+    parser.add_argument('--metrics-json', default='', type=str,
+                        help='Optional path to write parseable epoch metrics as JSON')
     parser.add_argument('--checkpoint-hist', type=int, default=3, metavar='N',
                         help='number of checkpoints to keep')
 
     # 断点续训
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='Resume full model and optimizer state from checkpoint')
+    parser.add_argument('--resume-weights-only', action='store_true', default=False,
+                        help='Load only model weights from --resume and start a fresh optimizer/scheduler')
     parser.add_argument('--auto-resume', action='store_true', default=True,
                         help='Auto resume from latest checkpoint in checkpoint-dir')
 
@@ -242,7 +251,9 @@ def parse_args():
             cfg = yaml.safe_load(f)
             parser.set_defaults(**cfg)
 
-    args = parser.parse_args(remaining)
+    # Apply YAML as defaults, then parse the full command line so explicit CLI
+    # arguments override config values for budgeted pilot runs.
+    args = parser.parse_args()
     return args
 
 kl_loss = torch.nn.KLDivLoss(reduction='batchmean').cuda()
@@ -330,7 +341,7 @@ def train_one_epoch(
     """
     基于Sandwich Rule的单epoch训练
 
-    每次迭代同时训练K个子网，所有子网共享参数，统一反向传播
+    每次迭代训练K个子网，所有子网共享参数，梯度按K归一化后统一更新
     """
     if amp_autocast is None:
         from contextlib import suppress
@@ -345,10 +356,14 @@ def train_one_epoch(
     model.train()
 
     end = time.time()
-    last_idx = len(loader) - 1
-    num_updates = epoch * len(loader)
+    max_batches = int(getattr(args, 'limit_train_batches', 0) or 0)
+    effective_len = min(len(loader), max_batches) if max_batches else len(loader)
+    last_idx = effective_len - 1
+    num_updates = epoch * effective_len
 
     for batch_idx, (input, target) in enumerate(loader):
+        if max_batches and batch_idx >= max_batches:
+            break
         data_time_m.update(time.time() - end)
 
         if not args.no_prefetcher:
@@ -365,52 +380,46 @@ def train_one_epoch(
         # 获取Sandwich Rule子网
         subnets = get_sandwich_subnet_genotypes(k=args.supernet_k)
 
-        total_loss = 0
         subnet_losses = {}
-
-        # 检查是否是DDP模型
-        is_ddp = hasattr(model, 'module') and hasattr(model, 'no_sync')
+        total_loss_value = 0.0
+        optimizer.zero_grad()
+        scaler = getattr(loss_scaler, '_scaler', None) if loss_scaler is not None else None
 
         # 依次前向传播每个子网
-        for idx, (tag_prefix, genotype) in enumerate(subnets):
-            # 只有最后一个子网需要梯度同步
-            need_sync = is_ddp and (idx == len(subnets) - 1)
-            from contextlib import nullcontext
-            context = model.no_sync() if is_ddp and not need_sync else nullcontext()
+        for tag_prefix, genotype in subnets:
+            with amp_autocast():
+                output = model(input, genotype)
+                loss = loss_fn(output, target)
 
-            with context:
-                with amp_autocast():
-                    output = model(input, genotype)
-                    loss = loss_fn(output, target)
+                if args.mesa > 0.0 and model_ema is not None:
+                    if epoch / args.epochs > args.mesa_start_ratio:
+                        with torch.no_grad():
+                            ema_output = model_ema.module(input).data.detach()
+                        kd = kdloss(output, ema_output)
+                        loss += args.mesa * kd
 
-                    if args.mesa > 0.0 and model_ema is not None:
-                        if epoch / args.epochs > args.mesa_start_ratio:
-                            with torch.no_grad():
-                                ema_output = model_ema.module(input).data.detach()
-                            kd = kdloss(output, ema_output)
-                            loss += args.mesa * kd
-
-            subnet_losses[tag_prefix] = loss
-            total_loss = total_loss + loss
+            raw_loss = loss.detach()
+            scaled_loss = loss / args.supernet_k
+            subnet_losses[tag_prefix] = raw_loss
+            total_loss_value += raw_loss.item()
 
             # 更新计量器
             if tag_prefix not in subnet_loss_meters:
                 subnet_loss_meters[tag_prefix] = AverageMeter()
-            subnet_loss_meters[tag_prefix].update(loss.item(), input.size(0))
+            subnet_loss_meters[tag_prefix].update(raw_loss.item(), input.size(0))
 
-        avg_loss = total_loss / args.supernet_k  # 梯度归一化
+            if scaler is not None:
+                scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
 
-        # 统一反向传播
-        optimizer.zero_grad()
-
-        if loss_scaler is not None:
-            loss_scaler(
-                avg_loss, optimizer,
-                clip_grad=args.clip_grad,
-                parameters=model.parameters(),
-                create_graph=False)
+        if scaler is not None:
+            if args.clip_grad is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            avg_loss.backward()
             if args.clip_grad is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
@@ -445,12 +454,13 @@ def train_one_epoch(
             lr = sum(lrl) / len(lrl)
 
             if args.local_rank == 0:
+                progress = 100. * batch_idx / max(1, last_idx)
                 log_parts = [
-                    f'Train: {epoch} [{batch_idx:>4d}/{len(loader)} ({100. * batch_idx / last_idx:>3.0f}%)]'
+                    f'Train: {epoch} [{batch_idx:>4d}/{effective_len} ({progress:>3.0f}%)]'
                 ]
                 for tag_prefix, loss_val in subnet_losses.items():
                     log_parts.append(f'{tag_prefix}_loss: {loss_val.item():.4f}')
-                log_parts.append(f'Total: {total_loss.item():.4f}')
+                log_parts.append(f'Total: {total_loss_value:.4f}')
                 log_parts.append(f'LR: {lr:.3e}')
                 _logger.info('  '.join(log_parts))
 
@@ -495,13 +505,17 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
     model.eval()
 
     end = time.time()
-    last_idx = len(loader) - 1
+    max_batches = int(getattr(args, 'limit_val_batches', 0) or 0)
+    effective_len = min(len(loader), max_batches) if max_batches else len(loader)
+    last_idx = effective_len - 1
 
     # 默认使用中等子网进行验证
     if genotype is None:
         genotype = 'M' * TOTAL_LAYERS
 
     for batch_idx, (input, target) in enumerate(loader):
+        if max_batches and batch_idx >= max_batches:
+            break
         last_batch = batch_idx == last_idx
 
         if not args.no_prefetcher:
@@ -556,6 +570,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
                 log_triggered = True
 
         if args.local_rank == 0 and log_triggered:
+            display_total = max(0, effective_len - 1)
             log_name = 'Test' + log_suffix
             _logger.info(
                 '{0}: [{1:>4d}/{2}]  '
@@ -563,7 +578,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=None, log_suffix='', log
                 'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
                 'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
                 'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
-                    log_name, batch_idx, last_idx, batch_time=batch_time_m,
+                    log_name, batch_idx, display_total, batch_time=batch_time_m,
                     loss=losses_m, top1=top1_m, top5=top5_m))
 
         end = time.time()
@@ -720,12 +735,19 @@ def main():
     start_epoch = 0
     best_metric = None
     if args.resume:
+        resume_optimizer = None if args.resume_weights_only else optimizer
+        resume_scheduler = None if args.resume_weights_only else lr_scheduler
+        resume_loss_scaler = None if args.resume_weights_only else loss_scaler
         result = load_checkpoint(
-            args.resume, model, optimizer, lr_scheduler,
-            model_ema, loss_scaler, strict=True
+            args.resume, model, resume_optimizer, resume_scheduler,
+            model_ema, resume_loss_scaler, strict=True
         )
-        start_epoch = result['epoch'] + 1
-        best_metric = result['best_metric']
+        if args.resume_weights_only:
+            start_epoch = 0
+            best_metric = None
+        else:
+            start_epoch = result['epoch'] + 1
+            best_metric = result['best_metric']
     elif args.auto_resume:
         start_epoch, best_metric = resume_training(
             args.checkpoint_dir, model, optimizer, lr_scheduler,
@@ -740,7 +762,7 @@ def main():
 
     # 分布式包装
     if args.distributed:
-        model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=True)
+        model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=True, find_unused_parameters=True)
 
     # 创建数据加载器
     loader_train, loader_eval, mixup_fn, data_config = create_dataloaders(args)
@@ -772,6 +794,7 @@ def main():
     # 训练循环
     eval_metric = 'top1'
     best_epoch = None
+    history = []
 
     _logger.info(f'Starting training from epoch {start_epoch}, total epochs {num_epochs}')
 
@@ -847,6 +870,27 @@ def main():
                     f'Epoch {epoch}: test_acc1={eval_metrics["top1"]:.4f}, '
                     f'test_loss={eval_metrics["loss"]:.4f}, best_acc1={best_metric:.4f} (epoch {best_epoch})'
                 )
+
+                history.append(OrderedDict([
+                    ('epoch', epoch),
+                    ('train', train_metrics),
+                    ('eval', eval_metrics),
+                    ('best_metric', best_metric),
+                    ('best_epoch', best_epoch),
+                ]))
+                if args.metrics_json:
+                    os.makedirs(os.path.dirname(args.metrics_json) or '.', exist_ok=True)
+                    with open(args.metrics_json, 'w') as f:
+                        json.dump(OrderedDict([
+                            ('tag', args.tag),
+                            ('config', args.config),
+                            ('supernet_dim', args.supernet_dim),
+                            ('supernet_in_dim', args.supernet_in_dim),
+                            ('supernet_num_heads', args.supernet_num_heads),
+                            ('limit_train_batches', getattr(args, 'limit_train_batches', 0)),
+                            ('limit_val_batches', getattr(args, 'limit_val_batches', 0)),
+                            ('history', history),
+                        ]), f, indent=2)
 
                 # 记录各子网训练loss
                 if log_writer is not None:
